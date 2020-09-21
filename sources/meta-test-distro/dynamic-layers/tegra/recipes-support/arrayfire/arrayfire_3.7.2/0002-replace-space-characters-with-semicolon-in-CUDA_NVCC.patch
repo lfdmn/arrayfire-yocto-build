@@ -1,0 +1,29 @@
+From b29a82f836faaa79ed696bb496ecd3c1a33b9b9b Mon Sep 17 00:00:00 2001
+From: Damien LEFEVRE <lefevre.da@gmail.com>
+Date: Thu, 17 Sep 2020 09:53:27 +0300
+Subject: [PATCH 2/2] replace space characters with semicolon in
+ CUDA_NVCC_FLAGS
+
+---
+ src/backend/cuda/CMakeLists.txt | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/backend/cuda/CMakeLists.txt b/src/backend/cuda/CMakeLists.txt
+index 4488c178..d617cb32 100644
+--- a/src/backend/cuda/CMakeLists.txt
++++ b/src/backend/cuda/CMakeLists.txt
+@@ -89,7 +89,10 @@ set(CUDA_architecture_build_targets ${detected_gpus} CACHE
+ cuda_select_nvcc_arch_flags(cuda_architecture_flags ${CUDA_architecture_build_targets})
+ message(STATUS "CUDA_architecture_build_targets: ${CUDA_architecture_build_targets}")
+ 
+-set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};${cuda_architecture_flags})
++# Builds fails with space reparators in CUDA_NVCC_FLAGS. Replacing them with semicolon
++string(REPLACE " " ";" CUDA_NVCC_FLAGS_REPLACED ${CUDA_NVCC_FLAGS})
++
++set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS_REPLACED};${cuda_architecture_flags})
+ 
+ mark_as_advanced(
+     CUDA_LIBRARIES_PATH
+-- 
+2.17.1
+

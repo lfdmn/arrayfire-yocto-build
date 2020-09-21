@@ -1,0 +1,419 @@
+From 64a51045ce2fbbb748c4ec4d2b259ee1f6407918 Mon Sep 17 00:00:00 2001
+From: Damien LEFEVRE <lefevre.da@gmail.com>
+Date: Tue, 10 Mar 2020 14:53:11 +0200
+Subject: [PATCH] Added CUDA stream support
+
+---
+ include/af/array.h                  |  4 ++--
+ include/af/device.h                 |  2 +-
+ src/api/c/memory.cpp                | 28 ++++++++++++++--------------
+ src/api/cpp/array.cpp               | 19 ++++++++++++++-----
+ src/api/unified/device.cpp          |  4 ++--
+ src/backend/cpu/Array.hpp           |  6 +++---
+ src/backend/cuda/Array.cpp          |  6 +++---
+ src/backend/cuda/Array.hpp          | 11 +++++------
+ src/backend/cuda/copy.cu            |  8 ++++----
+ src/backend/cuda/copy.hpp           |  2 +-
+ src/backend/cuda/debug_cuda.hpp     | 21 +++++++++++++++++++++
+ src/backend/cuda/kernel/memcopy.hpp | 15 ++++++++++++---
+ src/backend/cuda/platform.cpp       |  4 ++--
+ src/backend/opencl/Array.hpp        |  6 +++---
+ 14 files changed, 87 insertions(+), 49 deletions(-)
+
+diff --git a/include/af/array.h b/include/af/array.h
+index 72869a7..e05643a 100644
+--- a/include/af/array.h
++++ b/include/af/array.h
+@@ -135,7 +135,7 @@ namespace af
+             array T() const;
+             array H() const;
+             template<typename T> T scalar() const;
+-            template<typename T> T* device() const;
++            template<typename T> T* device(void *stream = nullptr) const;
+             void unlock() const;
+ #if AF_API_VERSION >= 31
+             void lock() const;
+@@ -732,7 +732,7 @@ namespace af
+ 
+            \ingroup device_mat
+         */
+-        template<typename T> T* device() const;
++        template<typename T> T* device(void *stream = nullptr) const;
+         /**
+            @}
+         */
+diff --git a/include/af/device.h b/include/af/device.h
+index 6c7db03..dda872c 100644
+--- a/include/af/device.h
++++ b/include/af/device.h
+@@ -472,7 +472,7 @@ extern "C" {
+ 
+        \note For OpenCL backend *ptr should be cast to cl_mem.
+     */
+-    AFAPI af_err af_get_device_ptr(void **ptr, const af_array arr);
++    AFAPI af_err af_get_device_ptr(void **ptr, const af_array arr, void *stream);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/src/api/c/memory.cpp b/src/api/c/memory.cpp
+index ff7a18f..6bc21a8 100644
+--- a/src/api/c/memory.cpp
++++ b/src/api/c/memory.cpp
+@@ -94,25 +94,25 @@ af_err af_device_array(af_array *arr, void *data, const unsigned ndims,
+     return AF_SUCCESS;
+ }
+ 
+-af_err af_get_device_ptr(void **data, const af_array arr) {
++af_err af_get_device_ptr(void **data, const af_array arr, void *stream) {
+     try {
+         af_dtype type = getInfo(arr).getType();
+ 
+         switch (type) {
+             // FIXME: Perform copy if memory not continuous
+-            case f32: *data = getDevicePtr(getArray<float>(arr)); break;
+-            case f64: *data = getDevicePtr(getArray<double>(arr)); break;
+-            case c32: *data = getDevicePtr(getArray<cfloat>(arr)); break;
+-            case c64: *data = getDevicePtr(getArray<cdouble>(arr)); break;
+-            case s32: *data = getDevicePtr(getArray<int>(arr)); break;
+-            case u32: *data = getDevicePtr(getArray<uint>(arr)); break;
+-            case s64: *data = getDevicePtr(getArray<intl>(arr)); break;
+-            case u64: *data = getDevicePtr(getArray<uintl>(arr)); break;
+-            case s16: *data = getDevicePtr(getArray<short>(arr)); break;
+-            case u16: *data = getDevicePtr(getArray<ushort>(arr)); break;
+-            case u8: *data = getDevicePtr(getArray<uchar>(arr)); break;
+-            case b8: *data = getDevicePtr(getArray<char>(arr)); break;
+-            case f16: *data = getDevicePtr(getArray<half>(arr)); break;
++            case f32: *data = getDevicePtr(getArray<float>(arr), stream); break;
++            case f64: *data = getDevicePtr(getArray<double>(arr), stream); break;
++            case c32: *data = getDevicePtr(getArray<cfloat>(arr), stream); break;
++            case c64: *data = getDevicePtr(getArray<cdouble>(arr), stream); break;
++            case s32: *data = getDevicePtr(getArray<int>(arr), stream); break;
++            case u32: *data = getDevicePtr(getArray<uint>(arr), stream); break;
++            case s64: *data = getDevicePtr(getArray<intl>(arr), stream); break;
++            case u64: *data = getDevicePtr(getArray<uintl>(arr), stream); break;
++            case s16: *data = getDevicePtr(getArray<short>(arr), stream); break;
++            case u16: *data = getDevicePtr(getArray<ushort>(arr),stream); break;
++            case u8: *data = getDevicePtr(getArray<uchar>(arr), stream); break;
++            case b8: *data = getDevicePtr(getArray<char>(arr), stream); break;
++            case f16: *data = getDevicePtr(getArray<half>(arr), stream); break;
+ 
+             default: TYPE_ERROR(4, type);
+         }
+diff --git a/src/api/cpp/array.cpp b/src/api/cpp/array.cpp
+index f85f21f..13b84b4 100644
+--- a/src/api/cpp/array.cpp
++++ b/src/api/cpp/array.cpp
+@@ -980,9 +980,9 @@ void array::eval() const { AF_THROW(af_eval(get())); }
+         return val;                                                            \
+     }                                                                          \
+     template<>                                                                 \
+-    AFAPI T *array::device() const {                                           \
++    AFAPI T *array::device(void *stream) const {                               \
+         void *ptr = NULL;                                                      \
+-        AF_THROW(af_get_device_ptr(&ptr, get()));                              \
++        AF_THROW(af_get_device_ptr(&ptr, get(), stream));                      \
+         return (T *)ptr;                                                       \
+     }                                                                          \
+     template<>                                                                 \
+@@ -1019,9 +1019,9 @@ AFAPI void array::write(const void *ptr, const size_t bytes, af::source src) {
+ #undef INSTANTIATE
+ 
+ template<>
+-AFAPI void *array::device() const {
++AFAPI void *array::device(void *stream) const {
+     void *ptr = nullptr;
+-    AF_THROW(af_get_device_ptr(&ptr, get()));
++    AF_THROW(af_get_device_ptr(&ptr, get(), stream));
+     return ptr;
+ }
+ 
+@@ -1033,10 +1033,19 @@ AFAPI void *array::device() const {
+         return out.FUNC<TYPE>();                         \
+     }
+ 
++
++// array_proxy instanciations
++#define TEMPLATE_MEM_FUNC_STREAM(TYPE, RETURN_TYPE, FUNC)       \
++    template<>                                           \
++    AFAPI RETURN_TYPE array::array_proxy::FUNC(void *stream) const { \
++        array out = *this;                               \
++        return out.FUNC<TYPE>(stream);                         \
++    }
++
+ #define INSTANTIATE(T)              \
+     TEMPLATE_MEM_FUNC(T, T *, host) \
+     TEMPLATE_MEM_FUNC(T, T, scalar) \
+-    TEMPLATE_MEM_FUNC(T, T *, device)
++    TEMPLATE_MEM_FUNC_STREAM(T, T *, device)
+ 
+ INSTANTIATE(cdouble)
+ INSTANTIATE(cfloat)
+diff --git a/src/api/unified/device.cpp b/src/api/unified/device.cpp
+index cee81de..17d0f48 100644
+--- a/src/api/unified/device.cpp
++++ b/src/api/unified/device.cpp
+@@ -151,9 +151,9 @@ af_err af_is_locked_array(bool *res, const af_array arr) {
+     CALL(af_is_locked_array, res, arr);
+ }
+ 
+-af_err af_get_device_ptr(void **ptr, const af_array arr) {
++af_err af_get_device_ptr(void **ptr, const af_array arr, void *stream) {
+     CHECK_ARRAYS(arr);
+-    CALL(af_get_device_ptr, ptr, arr);
++    CALL(af_get_device_ptr, ptr, arr, stream);
+ }
+ 
+ af_err af_eval_multiple(const int num, af_array *arrays) {
+diff --git a/src/backend/cpu/Array.hpp b/src/backend/cpu/Array.hpp
+index ad8816f..1bc6c69 100644
+--- a/src/backend/cpu/Array.hpp
++++ b/src/backend/cpu/Array.hpp
+@@ -94,8 +94,8 @@ template<typename T>
+ kJITHeuristics passesJitHeuristics(jit::Node *node);
+ 
+ template<typename T>
+-void *getDevicePtr(const Array<T> &arr) {
+-    T *ptr = arr.device();
++void *getDevicePtr(const Array<T> &arr, void *stream = nullptr) {
++    T *ptr = arr.device(stream);
+     memLock(ptr);
+ 
+     return (void *)ptr;
+@@ -250,7 +250,7 @@ class Array {
+                                         std::vector<jit::Node_ptr> nodes);
+ 
+     friend void destroyArray<T>(Array<T> *arr);
+-    friend void *getDevicePtr<T>(const Array<T> &arr);
++    friend void *getDevicePtr<T>(const Array<T> &arr, void *stream);
+     friend void *getRawPtr<T>(const Array<T> &arr);
+ };
+ 
+diff --git a/src/backend/cuda/Array.cpp b/src/backend/cuda/Array.cpp
+index abd1043..1dd5790 100644
+--- a/src/backend/cuda/Array.cpp
++++ b/src/backend/cuda/Array.cpp
+@@ -153,9 +153,9 @@ void Array<T>::eval() {
+ }
+ 
+ template<typename T>
+-T *Array<T>::device() {
++T *Array<T>::device(void *stream) {
+     if (!isOwner() || getOffset() || data.use_count() > 1) {
+-        *this = copyArray<T>(*this);
++        *this = copyArray<T>(*this, stream);
+     }
+     return this->get();
+ }
+@@ -416,7 +416,7 @@ void Array<T>::setDataDims(const dim4 &new_dims) {
+     template Node_ptr Array<T>::getNode() const;                              \
+     template void Array<T>::eval();                                           \
+     template void Array<T>::eval() const;                                     \
+-    template T *Array<T>::device();                                           \
++    template T *Array<T>::device(void *stream);                               \
+     template void writeHostDataArray<T>(Array<T> & arr, const T *const data,  \
+                                         const size_t bytes);                  \
+     template void writeDeviceDataArray<T>(                                    \
+diff --git a/src/backend/cuda/Array.hpp b/src/backend/cuda/Array.hpp
+index f29ef4a..2689a71 100644
+--- a/src/backend/cuda/Array.hpp
++++ b/src/backend/cuda/Array.hpp
+@@ -103,8 +103,8 @@ template<typename T>
+ kJITHeuristics passesJitHeuristics(common::Node *node);
+ 
+ template<typename T>
+-void *getDevicePtr(const Array<T> &arr) {
+-    T *ptr = arr.device();
++void *getDevicePtr(const Array<T> &arr, void *stream = nullptr) {
++    T *ptr = arr.device(stream);
+     memLock(ptr);
+     return (void *)ptr;
+ }
+@@ -202,9 +202,8 @@ class Array {
+         return bytes;
+     }
+ 
+-    T *device();
+-
+-    T *device() const { return const_cast<Array<T> *>(this)->device(); }
++    T *device(void *stream=nullptr);
++    T *device(void *stream=nullptr) const { return const_cast<Array<T> *>(this)->device(stream); }
+ 
+     T *get(bool withOffset = true) {
+         if (!isReady()) eval();
+@@ -255,7 +254,7 @@ class Array {
+                                       bool copy);
+ 
+     friend void destroyArray<T>(Array<T> *arr);
+-    friend void *getDevicePtr<T>(const Array<T> &arr);
++    friend void *getDevicePtr<T>(const Array<T> &arr, void *stream);
+     friend void *getRawPtr<T>(const Array<T> &arr);
+ };
+ 
+diff --git a/src/backend/cuda/copy.cu b/src/backend/cuda/copy.cu
+index 7ffd487..7e07754 100644
+--- a/src/backend/cuda/copy.cu
++++ b/src/backend/cuda/copy.cu
+@@ -48,18 +48,18 @@ void copyData(T *dst, const Array<T> &src) {
+ }
+ 
+ template<typename T>
+-Array<T> copyArray(const Array<T> &src) {
++Array<T> copyArray(const Array<T> &src, void *stream) {
+     Array<T> out = createEmptyArray<T>(src.dims());
+ 
+     if (src.isLinear()) {
+         CUDA_CHECK(
+             cudaMemcpyAsync(out.get(), src.get(), src.elements() * sizeof(T),
+-                            cudaMemcpyDeviceToDevice, cuda::getActiveStream()));
++                            cudaMemcpyDeviceToDevice, stream ? (cudaStream_t)stream : cuda::getActiveStream()));
+     } else {
+         // FIXME: Seems to fail when using Param<T>
+         kernel::memcopy(out.get(), out.strides().get(), src.get(),
+                         src.dims().get(), src.strides().get(),
+-                        (uint)src.ndims());
++                        (uint)src.ndims(), stream);
+     }
+     return out;
+ }
+@@ -111,7 +111,7 @@ void copyArray(Array<outType> &out, Array<inType> const &in) {
+ 
+ #define INSTANTIATE(T)                                       \
+     template void copyData<T>(T * dst, const Array<T> &src); \
+-    template Array<T> copyArray<T>(const Array<T> &src);     \
++    template Array<T> copyArray<T>(const Array<T> &src, void *stream);     \
+     template void multiply_inplace<T>(Array<T> & in, double norm);
+ 
+ INSTANTIATE(float)
+diff --git a/src/backend/cuda/copy.hpp b/src/backend/cuda/copy.hpp
+index be77883..f0e79b7 100644
+--- a/src/backend/cuda/copy.hpp
++++ b/src/backend/cuda/copy.hpp
+@@ -26,7 +26,7 @@ void copyData(T *dst, const Array<T> &src);
+ // \returns      A new Array<T> object with the same shape and data as the
+ //               \p src Array<T>
+ template<typename T>
+-Array<T> copyArray(const Array<T> &src);
++Array<T> copyArray(const Array<T> &src, void *stream=nullptr);
+ 
+ template<typename inType, typename outType>
+ void copyArray(Array<outType> &out, const Array<inType> &in);
+diff --git a/src/backend/cuda/debug_cuda.hpp b/src/backend/cuda/debug_cuda.hpp
+index f9482b9..45ba4b0 100644
+--- a/src/backend/cuda/debug_cuda.hpp
++++ b/src/backend/cuda/debug_cuda.hpp
+@@ -17,12 +17,23 @@
+ #define CUDA_LAUNCH(fn, blks, thrds, ...) \
+     CUDA_LAUNCH_SMEM(fn, blks, thrds, 0, __VA_ARGS__)
+ 
++
++#define CUDA_LAUNCH_SMEM_FROM(fn, blks, thrds, smem_size, stream, ...) \
++    fn<<<blks, thrds, smem_size, stream>>>(__VA_ARGS__)
++
++#define CUDA_LAUNCH_FROM(fn, blks, thrds, stream, ...) \
++    CUDA_LAUNCH_SMEM_FROM(fn, blks, thrds, 0, stream, __VA_ARGS__)
++
+ // FIXME: Add a special flag for debug
+ #ifndef NDEBUG
+ 
+ #define POST_LAUNCH_CHECK() \
+     do { CUDA_CHECK(cudaStreamSynchronize(cuda::getActiveStream())); } while (0)
+ 
++
++#define POST_LAUNCH_CHECK_FROM(stream) \
++    do { CUDA_CHECK(cudaStreamSynchronize(stream)); } while (0)
++
+ #else
+ 
+ #define POST_LAUNCH_CHECK()                                             \
+@@ -34,4 +45,14 @@
+         }                                                               \
+     } while (0)
+ 
++#define POST_LAUNCH_CHECK_FROM(stream)                                  \
++    do {                                                                \
++        if (cuda::synchronize_calls()) {                                \
++            CUDA_CHECK(cudaStreamSynchronize(stream)); \
++        } else {                                                        \
++            CUDA_CHECK(cudaPeekAtLastError());                          \
++        }                                                               \
++    } while (0)
++
++
+ #endif
+diff --git a/src/backend/cuda/kernel/memcopy.hpp b/src/backend/cuda/kernel/memcopy.hpp
+index 724cf0b..1d8843c 100644
+--- a/src/backend/cuda/kernel/memcopy.hpp
++++ b/src/backend/cuda/kernel/memcopy.hpp
+@@ -58,7 +58,7 @@ __global__ static void memcopy_kernel(T *out, const dims_t ostrides,
+ 
+ template<typename T>
+ void memcopy(T *out, const dim_t *ostrides, const T *in, const dim_t *idims,
+-             const dim_t *istrides, uint ndims) {
++             const dim_t *istrides, uint ndims, void *stream=nullptr) {
+     dim3 threads(DIMX, DIMY);
+ 
+     if (ndims == 1) {
+@@ -84,9 +84,18 @@ void memcopy(T *out, const dim_t *ostrides, const T *in, const dim_t *idims,
+     blocks.z = divup(blocks.y, maxBlocksY);
+     blocks.y = divup(blocks.y, blocks.z);
+ 
+-    CUDA_LAUNCH((memcopy_kernel<T>), blocks, threads, out, _ostrides, in,
++    if (stream)
++    {
++        CUDA_LAUNCH_FROM((memcopy_kernel<T>), blocks, threads, (cudaStream_t)stream, out,
++                _ostrides, in, _idims, _istrides, blocks_x, blocks_y);
++        POST_LAUNCH_CHECK_FROM((cudaStream_t)stream);
++    }
++    else
++    {
++        CUDA_LAUNCH((memcopy_kernel<T>), blocks, threads, out, _ostrides, in,
+                 _idims, _istrides, blocks_x, blocks_y);
+-    POST_LAUNCH_CHECK();
++        POST_LAUNCH_CHECK();
++    }
+ }
+ 
+ ///////////// BEGIN - templated help functions for copy_kernel /////////////////
+diff --git a/src/backend/cuda/platform.cpp b/src/backend/cuda/platform.cpp
+index f449343..ee235dc 100644
+--- a/src/backend/cuda/platform.cpp
++++ b/src/backend/cuda/platform.cpp
+@@ -526,9 +526,9 @@ af_err afcu_cublasSetMathMode(cublasMath_t mode) {
+ 
+ namespace af {
+ template<>
+-__half *array::device<__half>() const {
++__half *array::device<__half>(void *stream) const {
+     void *ptr = NULL;
+-    af_get_device_ptr(&ptr, get());
++    af_get_device_ptr(&ptr, get(), stream);
+     return (__half *)ptr;
+ }
+ }  // namespace af
+diff --git a/src/backend/opencl/Array.hpp b/src/backend/opencl/Array.hpp
+index 261464f..ea9475b 100644
+--- a/src/backend/opencl/Array.hpp
++++ b/src/backend/opencl/Array.hpp
+@@ -97,8 +97,8 @@ template<typename T>
+ kJITHeuristics passesJitHeuristics(common::Node *node);
+ 
+ template<typename T>
+-void *getDevicePtr(const Array<T> &arr) {
+-    const cl::Buffer *buf = arr.device();
++void *getDevicePtr(const Array<T> &arr, void *stream) {
++    const cl::Buffer *buf = arr.device(stream);
+     if (!buf) return NULL;
+     memLock((T *)buf);
+     cl_mem mem = (*buf)();
+@@ -284,7 +284,7 @@ class Array {
+                                       bool copy);
+ 
+     friend void destroyArray<T>(Array<T> *arr);
+-    friend void *getDevicePtr<T>(const Array<T> &arr);
++    friend void *getDevicePtr<T>(const Array<T> &arr, void *stream);
+     friend void *getRawPtr<T>(const Array<T> &arr);
+ };
+ 
+-- 
+2.7.4
+
